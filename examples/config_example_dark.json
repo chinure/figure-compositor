@@ -1,0 +1,20 @@
+{
+  "_description": "Example: Dark image plate (microscopy/fluorescence) with quantification panel below. Automatically detects dark mode.",
+  "panels": [
+    "./microscopy/channel_1.png",
+    "./microscopy/channel_2.png",
+    "./microscopy/merged.png",
+    "./quantification/bars.png"
+  ],
+  "labels": ["a", "b", "c", "d"],
+  "layout": "grid",
+  "grid": [2, 2],
+  "journal": "nature",
+  "output": "./figures/figure_5_microscopy",
+  "dpi": 300,
+  "fit_mode": "fill",
+  "dark_mode": "auto",
+  "standardize_bg": false,
+  "vector_output": true,
+  "font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+}

@@ -1,0 +1,26 @@
+{
+  "_description": "Example: Custom layout using gridspec-style descriptors. Panel 'a' spans 2 columns on top. Panels b/c share the bottom row. Panel 'd' is a tall panel on the right spanning 2 rows.",
+  "panels": [
+    "./results/overview_schematic.png",
+    "./results/detail_1.png",
+    "./results/detail_2.png",
+    "./results/tall_timecourse.png"
+  ],
+  "labels": ["a", "b", "c", "d"],
+  "layout": "custom",
+  "layout_specs": [
+    {"row": 0, "col": 0, "rowspan": 1, "colspan": 2},
+    {"row": 1, "col": 0, "rowspan": 1, "colspan": 1},
+    {"row": 1, "col": 1, "rowspan": 1, "colspan": 1},
+    {"row": 0, "col": 2, "rowspan": 2, "colspan": 1}
+  ],
+  "journal": "cell",
+  "width_mm": 174,
+  "height_mm": 130,
+  "output": "./figures/figure_4_custom",
+  "dpi": 300,
+  "fit_mode": "fit",
+  "dark_mode": false,
+  "standardize_bg": true,
+  "vector_output": true
+}

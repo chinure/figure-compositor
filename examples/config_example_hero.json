@@ -1,0 +1,20 @@
+{
+  "_description": "Example: Hero + support layout. Panel 'a' (heatmap) dominates top; panels b-d are supporting evidence below.",
+  "panels": [
+    "./results/main_heatmap.png",
+    "./results/validation_bar.png",
+    "./results/validation_scatter.png",
+    "./results/validation_trend.png"
+  ],
+  "labels": ["a", "b", "c", "d"],
+  "layout": "hero-top",
+  "hero_index": 0,
+  "hero_ratio": 0.55,
+  "journal": "nature",
+  "output": "./figures/figure_3_hero_support",
+  "dpi": 300,
+  "fit_mode": "fit",
+  "dark_mode": "auto",
+  "standardize_bg": true,
+  "vector_output": true
+}

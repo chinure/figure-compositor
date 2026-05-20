@@ -1,0 +1,20 @@
+{
+  "_description": "Example: Regular 2x2 grid for 4 bar chart panels targeting Nature.",
+  "panels": [
+    "./results/panel_a_heatmap.png",
+    "./results/panel_b_bars.png",
+    "./results/panel_c_scatter.png",
+    "./results/panel_d_trend.png"
+  ],
+  "labels": ["a", "b", "c", "d"],
+  "layout": "grid",
+  "grid": [2, 2],
+  "journal": "nature",
+  "output": "./figures/figure_2_composite",
+  "dpi": 300,
+  "fit_mode": "fit",
+  "label_position": "top-left",
+  "dark_mode": "auto",
+  "standardize_bg": true,
+  "vector_output": true
+}

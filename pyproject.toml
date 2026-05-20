@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "figure-compositor"
+version = "1.0.0"
+description = "Assemble plots and images into publication-ready multi-panel figures for top-tier journals"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Figure Compositor Contributors"}
+]
+keywords = ["scientific", "figures", "publication", "journal", "nature", "cell", "science", "multipanel", "composite"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Multimedia :: Graphics",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "Pillow>=9.0.0",
+    "numpy>=1.21.0",
+]
+
+[project.optional-dependencies]
+pdf = ["pdf2image>=1.16.0"]
+svg = ["cairosvg>=2.5.0"]
+all = ["pdf2image>=1.16.0", "cairosvg>=2.5.0"]
+dev = ["pytest>=7.0", "black", "ruff"]
+
+[project.scripts]
+compose-figure = "figure_compositor.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/chinure/figure-compositor"
+Documentation = "https://github.com/chinure/figure-compositor#readme"
+Issues = "https://github.com/chinure/figure-compositor/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["figure_compositor*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
