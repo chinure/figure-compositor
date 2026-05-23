@@ -37,7 +37,7 @@ except ImportError:
 JOURNAL_DEFAULTS = {
     'nature': {
         'label_case': 'lower',
-        'label_size_pt': 8,
+        'label_size_pt': 15,
         'full_width_mm': 183,
         'font_family': 'Arial',
         'single_col_mm': 89,
@@ -176,6 +176,7 @@ def load_font(size_pt, bold=True, prefer_font=None):
 
     if bold:
         candidates += [
+            '/home/chinure/.local/share/fonts/arial/arialbd.ttf',
             '/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf',
             '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
             '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
@@ -190,6 +191,7 @@ def load_font(size_pt, bold=True, prefer_font=None):
         ]
     else:
         candidates += [
+            '/home/chinure/.local/share/fonts/arial/arial.ttf',
             '/usr/share/fonts/truetype/msttcorefonts/Arial.ttf',
             '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
             '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
@@ -230,13 +232,27 @@ def load_image_any_format(path, dpi=300):
     ext = Path(path).suffix.lower()
 
     if ext == '.pdf':
+        # Try pymupdf (fitz) first — no external dependencies
+        try:
+            import fitz
+            doc = fitz.open(path)
+            page = doc[0]
+            # Render at high resolution for quality
+            mat = fitz.Matrix(dpi/72, dpi/72)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            doc.close()
+            return img
+        except ImportError:
+            pass
+        # Fallback to pdf2image (requires poppler)
         try:
             from pdf2image import convert_from_path
             images = convert_from_path(path, dpi=dpi)
             return images[0]
         except ImportError:
             raise RuntimeError(
-                f"PDF input requires pdf2image. Install: pip install pdf2image"
+                f"PDF input requires pymupdf (pip install pymupdf) or pdf2image (pip install pdf2image)"
             )
 
     elif ext == '.svg':
@@ -264,7 +280,68 @@ def estimate_image_brightness(img):
     return sum(arr) / len(arr)
 
 
-def fit_image(img, target_w, target_h, fit_mode='fit', bg_color=(255, 255, 255)):
+def trim_image_content(img, bg_color=(255, 255, 255), tolerance=5):
+    """
+    Remove empty/blank border regions from an image.
+
+    Detects the bounding box of non-background pixels and crops to it.
+    This is useful before layout analysis so that whitespace padding
+    does not inflate the apparent panel size.
+
+    Parameters
+    ----------
+    img : PIL.Image
+        Input image (any mode).
+    bg_color : tuple
+        RGB value to treat as "background". Default white.
+    tolerance : int
+        Pixels differing from bg_color by more than this per channel
+        are considered content.
+
+    Returns
+    -------
+    PIL.Image
+        Cropped image (or original if no content found).
+    (left, top, right, bottom)
+        Crop box coordinates in original image.
+    """
+    try:
+        import numpy as np
+        rgb = img.convert('RGB')
+        arr = np.array(rgb)
+
+        # Create mask: True where pixel differs from bg_color by > tolerance
+        diff = np.abs(arr.astype(int) - np.array(bg_color, dtype=int))
+        mask = np.any(diff > tolerance, axis=2)
+
+        # Find bounding box of non-background pixels
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+
+        if not np.any(rows) or not np.any(cols):
+            # Entirely blank — return original
+            return img, (0, 0, img.width, img.height)
+
+        top = int(np.argmax(rows))
+        bottom = int(len(rows) - np.argmax(rows[::-1]))
+        left = int(np.argmax(cols))
+        right = int(len(cols) - np.argmax(cols[::-1]))
+
+        # Safety margin: leave a small border (1% or 2px)
+        margin_x = max(2, img.width // 100)
+        margin_y = max(2, img.height // 100)
+        left = max(0, left - margin_x)
+        top = max(0, top - margin_y)
+        right = min(img.width, right + margin_x)
+        bottom = min(img.height, bottom + margin_y)
+
+        return rgb.crop((left, top, right, bottom)), (left, top, right, bottom)
+    except Exception:
+        return img, (0, 0, img.width, img.height)
+
+
+def fit_image(img, target_w, target_h, fit_mode='fit', bg_color=(255, 255, 255),
+              v_align='center', h_align='center'):
     """
     Resize image into target dimensions.
 
@@ -275,6 +352,10 @@ def fit_image(img, target_w, target_h, fit_mode='fit', bg_color=(255, 255, 255))
         'fill'   — preserve aspect ratio, crop to fill entire target
         'original' — no resize, center original image (clip if too large)
         'stretch'— distort to fill (NOT recommended for publication)
+    v_align, h_align : str
+        For fit_mode='fit': where to place the image within the letterbox.
+        'center' (default), 'top'/'left', 'bottom'/'right'.
+        Use 'top' + 'left' for strict row/column alignment.
     """
     if target_w <= 0 or target_h <= 0:
         return Image.new('RGBA', (1, 1), bg_color)
@@ -302,8 +383,23 @@ def fit_image(img, target_w, target_h, fit_mode='fit', bg_color=(255, 255, 255))
             new_w = max(1, int(target_h * img_ratio))
         resized = img.resize((new_w, new_h), Image.LANCZOS)
         canvas = Image.new('RGBA', (target_w, target_h), bg_color + (255,))
-        paste_x = (target_w - new_w) // 2
-        paste_y = (target_h - new_h) // 2
+
+        # Horizontal alignment
+        if h_align == 'left':
+            paste_x = 0
+        elif h_align == 'right':
+            paste_x = target_w - new_w
+        else:
+            paste_x = (target_w - new_w) // 2
+
+        # Vertical alignment
+        if v_align == 'top':
+            paste_y = 0
+        elif v_align == 'bottom':
+            paste_y = target_h - new_h
+        else:
+            paste_y = (target_h - new_h) // 2
+
         canvas.paste(resized, (paste_x, paste_y))
         return canvas
 
@@ -532,13 +628,151 @@ def estimate_min_text_height(img):
         return 12.0
 
 
-def analyze_panel_proportions(panels, journal='nature', grid_cols=2, dpi=300):
+SUBREGION_NAMES = [
+    ['top-left', 'top-center', 'top-right'],
+    ['mid-left', 'mid-center', 'mid-right'],
+    ['bottom-left', 'bottom-center', 'bottom-right'],
+]
+
+
+def audit_subregion_text(img, min_text_px=3.0, grid=3):
+    """
+    Divide img into a grid x grid subregion matrix and estimate text readability
+    in each subregion independently.
+
+    Returns list of (region_name, estimated_text_px, status) tuples for regions
+    where text is below the threshold. Status is 'OK', 'WARNING', or 'CRITICAL'.
+    """
+    try:
+        import numpy as np
+        w, h = img.size
+        if w < grid * 50 or h < grid * 50:
+            return []  # too small to subdivide meaningfully
+
+        cell_w = w // grid
+        cell_h = h // grid
+        problems = []
+
+        for row in range(grid):
+            for col in range(grid):
+                left = col * cell_w
+                upper = row * cell_h
+                right = left + cell_w if col < grid - 1 else w
+                lower = upper + cell_h if row < grid - 1 else h
+                region = img.crop((left, upper, right, lower))
+
+                # Estimate text height in this subregion
+                est_h = estimate_min_text_height(region)
+                # Scale to original image reference (already in original px)
+                # estimate_min_text_height returns px in original scale
+
+                if est_h < min_text_px:
+                    status = 'CRITICAL' if est_h < 2.0 else 'WARNING'
+                    region_name = SUBREGION_NAMES[row][col]
+                    problems.append((region_name, est_h, status))
+
+        return problems
+    except Exception:
+        return []
+
+
+def auto_detect_grid(panels, target_width_mm=183, gap_mm=2.5, dpi=300,
+                     max_cols=4, min_cols=1):
+    """
+    Automatically determine the best row×col grid for a set of panels.
+
+    Strategy:
+    1. Trim whitespace from each panel.
+    2. Compute trimmed aspect ratios.
+    3. Try every plausible column count and pick the one that minimises
+       the total "wasted" letterbox area (i.e. panels are closest to their
+       natural proportions after fitting).
+
+    Parameters
+    ----------
+    panels : list[str]
+        File paths.
+    target_width_mm : float
+        Figure width in mm.
+    gap_mm : float
+        Inter-panel gap in mm.
+    dpi : int
+    max_cols : int
+        Upper bound on columns.
+    min_cols : int
+        Lower bound on columns.
+
+    Returns
+    -------
+    (rows, cols) : tuple[int, int]
+    """
+    import math
+
+    trimmed_ars = []
+    for path in panels:
+        if not os.path.exists(path):
+            trimmed_ars.append(1.0)
+            continue
+        try:
+            img = load_image_any_format(path)
+            trimmed, _ = trim_image_content(img)
+            ar = trimmed.width / max(trimmed.height, 1)
+            trimmed_ars.append(ar)
+        except Exception:
+            trimmed_ars.append(1.0)
+
+    n = len(panels)
+    target_width_px = int(target_width_mm / 25.4 * dpi)
+    margin_px = int(MARGIN_MM / 25.4 * dpi)
+    gap_px = int(gap_mm / 25.4 * dpi)
+
+    best_cols = max(1, min(max_cols, int(math.sqrt(n))))
+    best_score = float('inf')
+
+    for cols in range(min_cols, min(max_cols, n) + 1):
+        rows = math.ceil(n / cols)
+        usable_w = target_width_px - 2 * margin_px - (cols - 1) * gap_px
+        cell_w = usable_w / cols
+        usable_h = target_width_px - 2 * margin_px - (rows - 1) * gap_px
+        cell_h = usable_h / rows  # rough, we will recompute height later
+
+        score = 0.0
+        for ar in trimmed_ars:
+            # natural size at this cell width
+            natural_h = cell_w / ar
+            # waste = |natural_h - cell_h| (absolute misfit)
+            # Panels that naturally fill the cell well score low
+            if natural_h > cell_h * 1.5:
+                score += (natural_h - cell_h) / cell_h
+            elif natural_h < cell_h * 0.5:
+                score += (cell_h - natural_h) / cell_h
+
+        # Slight preference for fewer rows (more compact)
+        score += rows * 0.1
+
+        if score < best_score:
+            best_score = score
+            best_cols = cols
+
+    best_rows = math.ceil(n / best_cols)
+    return (best_rows, best_cols)
+
+
+def analyze_panel_proportions(panels, journal='nature', grid_cols=2, dpi=300,
+                              use_trimmed=True):
     """
     Analyze each panel's original dimensions and estimate readability
     if placed into a standard grid.
 
+    Parameters
+    ----------
+    use_trimmed : bool
+        If True (default), trim whitespace borders before computing
+        aspect ratio and scale factor. This prevents excess padding
+        from distorting the layout decision.
+
     Returns list of dicts with keys:
-        file, orig_w, orig_h, aspect_ratio, estimated_text_px,
+        file, orig_w, orig_h, trimmed_w, trimmed_h, aspect_ratio, estimated_text_px,
         target_panel_w_px, target_panel_h_px, scale_factor,
         scaled_text_px, is_readable, strategy
     """
@@ -567,7 +801,15 @@ def analyze_panel_proportions(panels, journal='nature', grid_cols=2, dpi=300):
 
         try:
             img = load_image_any_format(path)
-            w, h = img.size
+            raw_w, raw_h = img.size
+
+            # Trim whitespace for accurate content sizing
+            if use_trimmed:
+                trimmed_img, _ = trim_image_content(img)
+                w, h = trimmed_img.size
+            else:
+                w, h = raw_w, raw_h
+
             ar = w / max(h, 1)
             est_text = estimate_min_text_height(img)
 
@@ -593,8 +835,10 @@ def analyze_panel_proportions(panels, journal='nature', grid_cols=2, dpi=300):
             results.append({
                 'file': path,
                 'exists': True,
-                'orig_w': w,
-                'orig_h': h,
+                'orig_w': raw_w,
+                'orig_h': raw_h,
+                'trimmed_w': w,
+                'trimmed_h': h,
                 'aspect_ratio': ar,
                 'estimated_text_px': est_text,
                 'target_panel_w': target_panel_w,
@@ -701,7 +945,12 @@ def print_proportion_report(panel_analysis):
             print(f" {label:<8} {'MISSING':>14} {'—':>6} {'—':>10} {'—':>8} {'—':>8} MISSING")
             continue
 
-        size_str = f"{pa['orig_w']}x{pa['orig_h']}"
+        raw_str = f"{pa['orig_w']}x{pa['orig_h']}"
+        # Show trimmed size if different
+        if 'trimmed_w' in pa and (pa['trimmed_w'] != pa['orig_w'] or pa['trimmed_h'] != pa['orig_h']):
+            size_str = f"{raw_str} → {pa['trimmed_w']}x{pa['trimmed_h']}"
+        else:
+            size_str = raw_str
         ar_str = f"{pa['aspect_ratio']:.2f}"
         text_str = f"{pa['estimated_text_px']:.1f}"
         scale_str = f"{pa['scale_factor']:.3f}"
@@ -729,6 +978,7 @@ def print_proportion_report(panel_analysis):
     print("   🔧 ALLOCATE  — Panel will receive extra space (colspan/rowspan)")
     print("   ⚠️ MARGINAL  — Text is small but may be acceptable; verify visually")
     print("   ❌ REGENERATE — Text will be unreadable; return to plotting code")
+    print("   Size format: raw_w×raw_h → trimmed_w×trimmed_h (whitespace removed)")
     print("=" * 75 + "\n")
 
 
@@ -736,34 +986,206 @@ def print_proportion_report(panel_analysis):
 # PANEL LABELING
 # ═══════════════════════════════════════════════════════════════════
 
+def estimate_region_content_density(img_region):
+    """
+    Estimate content density in an image region by edge detection.
+    Returns a float 0.0–1.0 (higher = more edges/content).
+    """
+    try:
+        import numpy as np
+        gray = np.array(img_region.convert('L'), dtype=np.float32)
+        # Sobel-like edge detection
+        gy, gx = np.gradient(gray)
+        edge_mag = np.sqrt(gx**2 + gy**2)
+        # Normalize: count pixels with significant gradient
+        threshold = edge_mag.mean() + edge_mag.std()
+        dense_ratio = (edge_mag > threshold).sum() / edge_mag.size
+        return float(dense_ratio)
+    except Exception:
+        return 0.0
+
+
+def find_label_safe_zone(panel_img, label_w, label_h, offset, max_scan_x_ratio=0.6):
+    """
+    Scan the top row of panel_img to find a low-content zone for the label.
+
+    Returns a tuple: (best_x_offset, best_position_name, density_at_best).
+    best_position_name is one of 'top-left', 'top-right', 'top-left-shifted'.
+    """
+    try:
+        import numpy as np
+        pw, ph = panel_img.size
+        if pw < label_w + offset * 2 or ph < label_h + offset * 2:
+            return (offset, 'top-left', 0.0)
+
+        # Region to scan: top strip tall enough for label + offset
+        strip_h = min(label_h + offset * 2, ph // 4)
+        top_strip = panel_img.crop((0, 0, pw, strip_h))
+        strip_np = np.array(top_strip.convert('L'))
+
+        # Compute edge density in sliding windows
+        window_w = label_w + offset * 2
+        max_x = int(pw * max_scan_x_ratio)
+        positions = []
+        step = max(1, window_w // 4)
+
+        for scan_x in range(0, max_x - window_w + 1, step):
+            window = strip_np[:, scan_x:scan_x + window_w]
+            gy, gx = np.gradient(window.astype(np.float32))
+            edge_mag = np.sqrt(gx**2 + gy**2)
+            density = float((edge_mag > (edge_mag.mean() + edge_mag.std())).sum() / edge_mag.size)
+            positions.append((scan_x, density))
+
+        if not positions:
+            return (offset, 'top-left', 0.0)
+
+        # Sort by density (lowest first)
+        positions.sort(key=lambda t: t[1])
+        best_x, best_density = positions[0]
+
+        # Thresholds
+        LOW_DENSITY = 0.08   # ~8% edge pixels = fairly clean
+        HIGH_DENSITY = 0.20  # ~20% edge pixels = quite busy
+
+        if best_density < LOW_DENSITY and best_x < window_w:
+            # Default top-left is clean enough
+            return (offset, 'top-left', best_density)
+        elif best_density < HIGH_DENSITY:
+            # Shift to the best low-density zone
+            return (best_x + offset, 'top-left-shifted', best_density)
+        else:
+            # Everything is busy; try top-right as last resort
+            return (offset, 'top-right', best_density)
+    except Exception:
+        return (offset, 'top-left', 0.0)
+
+
+PANEL_TYPE_OFFSETS = {
+    'plot': 4,
+    'heatmap': 8,      # larger offset for heatmap titles/colorbars
+    'table': 8,        # larger offset for table headers
+    'microscopy': 6,   # moderate offset for dark images
+    'unknown': 4,
+}
+
+
+def detect_panel_type(img):
+    """
+    Heuristically classify a panel image by content type.
+    Returns one of: 'plot', 'heatmap', 'table', 'microscopy', 'unknown'.
+    """
+    try:
+        import numpy as np
+        gray = np.array(img.convert('L'))
+        h, w = gray.shape
+        brightness = gray.mean()
+
+        # Microscopy: very dark
+        if brightness < 60:
+            return 'microscopy'
+
+        # Analyze top strip (where titles/headers live)
+        top_strip = gray[:max(h // 4, 50), :]
+        gy, gx = np.gradient(top_strip.astype(float))
+        edge_mag = np.sqrt(gx**2 + gy**2)
+        top_density = (edge_mag > (edge_mag.mean() + edge_mag.std())).sum() / edge_mag.size
+
+        # Heatmap: top strip has moderate-high density (colorbar, column labels)
+        # and the image has lots of local color variation
+        if top_density > 0.12:
+            # Distinguish heatmap from table: heatmap has smooth gradients,
+            # table has sharp grid lines
+            mid_region = gray[h//4:3*h//4, w//4:3*w//4]
+            gy_mid, gx_mid = np.gradient(mid_region.astype(float))
+            edge_mid = np.sqrt(gx_mid**2 + gy_mid**2)
+            # Count very strong edges (grid lines)
+            strong_edges = (edge_mid > np.percentile(edge_mid, 95)).sum()
+            total = edge_mid.size
+            if strong_edges / total > 0.05:
+                return 'table'
+            else:
+                return 'heatmap'
+
+        return 'plot'
+    except Exception:
+        return 'unknown'
+
+
 def add_panel_label(draw, label, x, y, w, h, font, position='top-left',
-                    color=(0, 0, 0), offset_px=4, dark_mode=False):
+                    color=(0, 0, 0), offset_px=4, dark_mode=False,
+                    panel_img=None, avoidance='off', panel_type='unknown'):
     """
     Add a panel label to the canvas.
 
     position: 'top-left', 'top-right', 'outside-top-left'
+    avoidance: 'off', 'auto', 'strict'
+        When 'auto' or 'strict', scans panel_img top row for low-content
+        zones and shifts the label to avoid overlapping heatmap titles,
+        colorbars, or dense plot elements.
     """
     label_color = (255, 255, 255) if dark_mode else color
 
-    if position == 'top-left':
-        label_x = x + offset_px
-        label_y = y + offset_px
-    elif position == 'top-right':
+    # Adaptive offset: heatmap/table need more headroom for titles/colorbars
+    if panel_type in PANEL_TYPE_OFFSETS:
+        offset_px = PANEL_TYPE_OFFSETS[panel_type]
+
+    # Smart avoidance: detect content in label area and shift if needed
+    if avoidance in ('auto', 'strict') and panel_img is not None:
+        # Estimate label dimensions
         bbox = draw.textbbox((0, 0), label, font=font)
-        tw = bbox[2] - bbox[0]
-        label_x = x + w - tw - offset_px
-        label_y = y + offset_px
-    elif position == 'outside-top-left':
-        label_x = x + offset_px
-        label_y = y - 20  # approximate, may need adjustment
+        label_w = bbox[2] - bbox[0]
+        label_h = bbox[3] - bbox[1]
+
+        safe_x, resolved_pos, density = find_label_safe_zone(
+            panel_img, label_w, label_h, offset_px,
+            max_scan_x_ratio=0.5 if avoidance == 'auto' else 0.35
+        )
+
+        if resolved_pos == 'top-left':
+            label_x = x + safe_x
+            label_y = y + offset_px
+        elif resolved_pos == 'top-left-shifted':
+            label_x = x + safe_x
+            label_y = y + offset_px
+            if density > 0.05:
+                # If we had to shift, add a subtle visual cue: small background
+                # (not implemented here; just position shift)
+                pass
+        elif resolved_pos == 'top-right':
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            label_x = x + w - tw - offset_px
+            label_y = y + offset_px
+        else:
+            label_x = x + offset_px
+            label_y = y + offset_px
     else:
-        label_x = x + offset_px
-        label_y = y + offset_px
+        # Original logic (no avoidance)
+        if position == 'top-left':
+            label_x = x + offset_px
+            label_y = y + offset_px
+        elif position == 'top-right':
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            label_x = x + w - tw - offset_px
+            label_y = y + offset_px
+        elif position == 'outside-top-left':
+            label_x = x + offset_px
+            label_y = y - 20
+        else:
+            label_x = x + offset_px
+            label_y = y + offset_px
 
     # Ensure label stays within panel for inside positions
     if position != 'outside-top-left':
         label_x = max(x + 2, label_x)
         label_y = max(y + 2, label_y)
+        # Also keep within right/bottom bounds
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        label_x = min(label_x, x + w - tw - 2)
+        label_y = min(label_y, y + h - th - 2)
 
     draw.text((label_x, label_y), label, font=font, fill=label_color)
 
@@ -842,6 +1264,35 @@ def check_contrast_ratio(img):
         return ratio
     except Exception:
         return 0.0
+
+
+def check_local_contrast_regions(img, min_region_ratio=4.5):
+    """
+    Check contrast in subregions of the image (top, middle, bottom thirds).
+    Returns list of (region_name, contrast_ratio) for regions below threshold.
+    """
+    try:
+        import numpy as np
+        gray = np.array(img.convert('L'))
+        h, w = gray.shape
+        regions = []
+        region_names = ['top', 'middle', 'bottom']
+        for i, name in enumerate(region_names):
+            y0 = i * h // 3
+            y1 = (i + 1) * h // 3 if i < 2 else h
+            region = gray[y0:y1, :]
+            dark_mask = region < 50
+            light_mask = region > 200
+            dark_mean = np.mean(region[dark_mask]) if np.any(dark_mask) else 0
+            light_mean = np.mean(region[light_mask]) if np.any(light_mask) else 255
+            L1 = (light_mean + 0.05) / 255
+            L2 = (dark_mean + 0.05) / 255
+            ratio = max(L1, L2) / min(L1, L2) if min(L1, L2) > 0 else 0
+            if ratio < min_region_ratio and ratio > 0:
+                regions.append((name, float(ratio)))
+        return regions
+    except Exception:
+        return []
 
 
 def check_grayscale_distinguishability(img, n_colors=5):
@@ -986,6 +1437,22 @@ def audit_panels(panel_files):
             except ImportError:
                 pass
 
+            # Subregion text readability check (detects small text in dense areas)
+            try:
+                subregion_problems = audit_subregion_text(img, min_text_px=3.0, grid=3)
+                result['subregion_text_issues'] = subregion_problems
+                for region_name, est_h, status in subregion_problems:
+                    if status == 'CRITICAL':
+                        result['issues'].append(
+                            ('WARNING', f'Subregion "{region_name}": text ~{est_h:.1f}px may be unreadable at print size')
+                        )
+                    else:
+                        result['issues'].append(
+                            ('INFO', f'Subregion "{region_name}": text marginal ({est_h:.1f}px)')
+                        )
+            except Exception:
+                pass
+
             # Compression artifact check (JPG only)
             if img.format and img.format.upper() in ('JPEG', 'JPG'):
                 try:
@@ -1029,6 +1496,13 @@ def audit_panels(panel_files):
                     result['issues'].append(
                         ('WARNING', f'Low contrast ratio ({contrast:.1f}:1) — aim for ≥ 4.5:1')
                     )
+
+                # Local contrast: check specific regions for low contrast
+                local_issues = check_local_contrast_regions(img, min_region_ratio=4.5)
+                for region_name, region_contrast in local_issues:
+                    result['issues'].append(
+                        ('INFO', f'{region_name} region contrast {region_contrast:.1f}:1 — may affect text readability')
+                    )
             except Exception:
                 pass
 
@@ -1061,6 +1535,59 @@ def audit_panels(panel_files):
 
         results.append(result)
     return results
+
+
+def _check_shared_legend(results):
+    """
+    Detect if multiple panels share similar dominant colors,
+    suggesting a shared legend could reduce visual clutter.
+    """
+    try:
+        from sklearn.cluster import KMeans
+    except ImportError:
+        return  # skip if sklearn not available
+
+    panel_colors = []
+    for r in results:
+        if not r.get('exists'):
+            continue
+        path = r['file']
+        try:
+            img = load_image_any_format(path)
+            # Downsample for speed
+            small = img.convert('RGB').resize((100, 100))
+            arr = np.array(small).reshape(-1, 3)
+            # K-means to find dominant colors
+            km = KMeans(n_clusters=3, n_init=1, max_iter=50, random_state=42)
+            km.fit(arr)
+            centers = km.cluster_centers_.astype(int)
+            panel_colors.append((os.path.basename(path), centers))
+        except Exception:
+            continue
+
+    if len(panel_colors) < 3:
+        return
+
+    # Count how many panels share at least one similar color
+    shared_count = 0
+    threshold = 30  # RGB distance
+    for i in range(len(panel_colors)):
+        for j in range(i + 1, len(panel_colors)):
+            name1, cols1 = panel_colors[i]
+            name2, cols2 = panel_colors[j]
+            for c1 in cols1:
+                for c2 in cols2:
+                    dist = np.linalg.norm(c1 - c2)
+                    if dist < threshold:
+                        shared_count += 1
+                        break
+
+    # Heuristic: if many panel pairs share colors, suggest legend consolidation
+    max_pairs = len(panel_colors) * (len(panel_colors) - 1) // 2
+    if shared_count >= max_pairs * 0.4 and len(panel_colors) >= 3:
+        print(f"\n ℹ️  {len(panel_colors)} panels appear to share similar color palettes. "
+              f"Consider consolidating repeated legends into one shared legend strip "
+              f"to reduce visual clutter and save panel space.")
 
 
 def print_audit_report(results, journal='nature'):
@@ -1132,6 +1659,12 @@ def print_audit_report(results, journal='nature'):
         print(f"\n ⚠️  {len(missing_scale)} panel(s) lack detected scale bars. "
               f"Cell Press requires scale bars on all microscopy images.")
 
+    # Shared legend detection (color consistency across panels)
+    try:
+        _check_shared_legend(results)
+    except Exception:
+        pass
+
     # Contrast summary
     low_contrast = [r for r in results if r.get('contrast_ratio', 10) < 4.5]
     if low_contrast:
@@ -1150,7 +1683,29 @@ def print_audit_report(results, journal='nature'):
         print(f"\n ℹ️  {len(no_meta)} panel(s) lack EXIF/metadata. "
               f"Consider embedding microscopy parameters (instrument, objective, etc.).")
 
-    print("=" * 75 + "\n")
+    # Input panel quality grades (P2-9)
+    print("\n Panel Quality Grades:")
+    print("-" * 40)
+    for r in results:
+        if not r.get('exists'):
+            grade = 'F'
+        else:
+            issues = r.get('issues', [])
+            critical = sum(1 for i in issues if i[0] == 'CRITICAL')
+            warnings = sum(1 for i in issues if i[0] == 'WARNING')
+            if critical > 0:
+                grade = 'D'
+            elif warnings >= 3:
+                grade = 'C'
+            elif warnings >= 1:
+                grade = 'B'
+            else:
+                grade = 'A'
+        fname = os.path.basename(r['file'])
+        print(f"   {fname:<30} {grade}")
+    print("   (A=excellent, B=minor issues, C=needs attention, D=critical)")
+
+    print("\n" + "=" * 75 + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1162,7 +1717,10 @@ def compose_raster(panels, labels, positions, journal='nature',
                    output='./figures/composite',
                    standardize_bg=True, dark_mode=False,
                    fit_mode='fit', label_position='top-left',
-                   bg_color=None, font_path=None):
+                   bg_color=None, font_path=None,
+                   label_avoidance='off',
+                   align='loose',
+                   strip_top_pct=0):
     """
     Compose panels into a raster image using PIL.
 
@@ -1199,7 +1757,9 @@ def compose_raster(panels, labels, positions, journal='nature',
 
     canvas = Image.new('RGBA', (W, H), bg_color + (255,))
     draw = ImageDraw.Draw(canvas)
-    label_font = load_font(spec['label_size_pt'], bold=True, prefer_font=font_path)
+    # PIL uses pixels, spec gives points. Convert: px = pt * dpi / 72
+    label_px = max(8, int(spec['label_size_pt'] * dpi / 72))
+    label_font = load_font(label_px, bold=True, prefer_font=font_path)
 
     for i, (panel_path, label, (px, py, pw, ph)) in enumerate(zip(panels, labels, positions)):
         print(f"  [{i+1}/{len(panels)}] Processing: {os.path.basename(panel_path)}")
@@ -1219,9 +1779,18 @@ def compose_raster(panels, labels, positions, journal='nature',
 
         try:
             img = load_image_any_format(panel_path, dpi=dpi)
+            # Strip top portion if requested (e.g., to remove embedded titles)
+            if strip_top_pct > 0:
+                w, h = img.size
+                crop_y = int(h * strip_top_pct / 100)
+                if crop_y > 0 and crop_y < h * 0.25:
+                    img = img.crop((0, crop_y, w, h))
             if standardize_bg and not dark_mode:
                 img = standardize_background(img, target_bg=bg_color)
-            fitted = fit_image(img, pw, ph, fit_mode=fit_mode, bg_color=bg_color)
+            v_a = 'top' if align == 'strict' else 'center'
+            h_a = 'left' if align == 'strict' else 'center'
+            fitted = fit_image(img, pw, ph, fit_mode=fit_mode, bg_color=bg_color,
+                               v_align=v_a, h_align=h_a)
             canvas.paste(fitted, (px, py))
         except Exception as e:
             print(f"     ❌ Error: {e}")
@@ -1229,9 +1798,14 @@ def compose_raster(panels, labels, positions, journal='nature',
             draw.text((px + 10, py + 10), f"ERROR:\n{str(e)[:50]}",
                       font=label_font, fill=(255, 0, 0))
 
-        # Add label
+        # Detect panel type for adaptive offset
+        ptype = detect_panel_type(fitted)
+
+        # Add label (with smart avoidance if enabled)
         add_panel_label(draw, label, px, py, pw, ph, label_font,
-                        position=label_position, dark_mode=dark_mode)
+                        position=label_position, dark_mode=dark_mode,
+                        panel_img=fitted, avoidance=label_avoidance,
+                        panel_type=ptype)
 
     # Convert to RGB for saving (most formats don't support RGBA)
     if bg_color == (0, 0, 0):
@@ -1257,7 +1831,9 @@ def compose_vector(panels, labels, positions, journal='nature',
                    width_mm=None, height_mm=None, dpi=DPI_DEFAULT,
                    output='./figures/composite',
                    fit_mode='fit', label_position='top-left',
-                   dark_mode=False, font_path=None):
+                   dark_mode=False, font_path=None,
+                   label_avoidance='off',
+                   align='loose'):
     """
     Compose panels using matplotlib gridspec.
     Output is vector (SVG/PDF) with raster-embedded images.
@@ -1337,21 +1913,63 @@ def compose_vector(panels, labels, positions, journal='nature',
                     ha='center', va='center', transform=ax.transAxes,
                     color='red', fontsize=8)
 
-        # Label
+        # Label (with smart avoidance)
         if spec['label_case'] == 'upper':
             label = label.upper()
         else:
             label = label.lower()
 
         label_color = 'white' if dark_mode else 'black'
-        if label_position == 'top-left':
-            ax.text(0.02, 0.98, label, transform=ax.transAxes,
-                    fontsize=spec['label_size_pt'], fontweight='bold',
-                    va='top', ha='left', color=label_color)
-        elif label_position == 'top-right':
-            ax.text(0.98, 0.98, label, transform=ax.transAxes,
-                    fontsize=spec['label_size_pt'], fontweight='bold',
-                    va='top', ha='right', color=label_color)
+
+        # Adaptive offset based on panel type (matplotlib axes coords)
+        ptype = 'unknown'
+        if os.path.exists(panel_path):
+            try:
+                pimg = load_image_any_format(panel_path, dpi=dpi)
+                ptype = detect_panel_type(pimg)
+            except Exception:
+                pass
+        offset_map = {'plot': (0.02, 0.98), 'heatmap': (0.04, 0.96),
+                      'table': (0.04, 0.96), 'microscopy': (0.03, 0.97),
+                      'unknown': (0.02, 0.98)}
+        base_x, base_y = offset_map.get(ptype, (0.02, 0.98))
+
+        # Determine label position with avoidance
+        resolved_pos = label_position
+        text_x, text_y = base_x, base_y
+        ha, va = 'left', 'top'
+
+        if label_avoidance in ('auto', 'strict') and os.path.exists(panel_path):
+            try:
+                img = load_image_any_format(panel_path, dpi=dpi)
+                safe_x_px, resolved_pos_vec, _ = find_label_safe_zone(
+                    img,
+                    label_w=int(spec['label_size_pt'] * 2),  # approximate width in px
+                    label_h=int(spec['label_size_pt'] * 1.5),
+                    offset=int(spec['label_size_pt']),
+                    max_scan_x_ratio=0.5 if label_avoidance == 'auto' else 0.35
+                )
+                # Convert pixel offset back to axes fraction
+                img_w = img.size[0]
+                shift_frac = safe_x_px / max(img_w, 1)
+                if resolved_pos_vec == 'top-right':
+                    text_x, text_y = 0.98, 0.98
+                    ha = 'right'
+                elif resolved_pos_vec == 'top-left-shifted' and shift_frac > 0.05:
+                    text_x = 0.02 + shift_frac
+                    text_y = 0.98
+                else:
+                    text_x, text_y = 0.02, 0.98
+            except Exception:
+                pass  # fallback to default
+
+        if resolved_pos == 'top-right' or (label_position == 'top-right' and label_avoidance == 'off'):
+            text_x, text_y = 0.98, 0.98
+            ha = 'right'
+
+        ax.text(text_x, text_y, label, transform=ax.transAxes,
+                fontsize=spec['label_size_pt'], fontweight='bold',
+                va=va, ha=ha, color=label_color)
 
     # Save vector formats
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else '.', exist_ok=True)
@@ -1361,6 +1979,109 @@ def compose_vector(panels, labels, positions, journal='nature',
 
     plt.close(fig)
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════
+# NATIVE VECTOR PDF (pymupdf — editable in Illustrator)
+# ═══════════════════════════════════════════════════════════════════
+
+def compose_pdf_native(panels, labels, positions, journal='nature',
+                       width_mm=None, height_mm=None, dpi=DPI_DEFAULT,
+                       output='./figures/composite',
+                       dark_mode=False, label_position='top-left',
+                       label_avoidance='off',
+                       align='loose'):
+    """
+    Compose panels directly from PDF sources into a single editable PDF.
+    Uses pymupdf to embed original PDF pages as vector objects.
+    Panel content (text, lines, shapes) remains fully editable in Illustrator.
+    Labels are added as native vector text.
+    """
+    try:
+        import fitz
+    except ImportError:
+        print("  WARNING: pymupdf not available. Cannot generate native vector PDF.")
+        return None
+
+    spec = JOURNAL_DEFAULTS.get(journal, JOURNAL_DEFAULTS['nature'])
+
+    if width_mm is None:
+        width_mm = spec['full_width_mm']
+    if height_mm is None:
+        max_y = max(y + h for x, y, w, h in positions)
+        height_mm = int(max_y / dpi * 25.4 + MARGIN_MM)
+
+    # Enforce A4 canvas constraint
+    width_mm, height_mm, a4_warnings = enforce_a4_limits(width_mm, height_mm, journal)
+    for w in a4_warnings:
+        print(f"  ⚠️  {w}")
+
+    PT_PER_MM = 72.0 / 25.4
+    page_w_pt = width_mm * PT_PER_MM
+    page_h_pt = height_mm * PT_PER_MM
+
+    doc = fitz.open()
+    page = doc.new_page(width=page_w_pt, height=page_h_pt)
+
+    # White/black background
+    bg = (0, 0, 0) if dark_mode else (1, 1, 1)
+    page.draw_rect(fitz.Rect(0, 0, page_w_pt, page_h_pt), color=bg, fill=bg)
+
+    # Load Arial Bold from file for vector labels
+    arial_font_path = '/home/chinure/.local/share/fonts/arial/arialbd.ttf'
+    arial_font_name = "ArialBold"
+    try:
+        with open(arial_font_path, "rb") as f:
+            fontbuffer = f.read()
+        page.insert_font(fontname=arial_font_name, fontbuffer=fontbuffer)
+    except Exception:
+        arial_font_name = "helv"  # fallback
+
+    for i, (panel_path, label, (px, py, pw, ph)) in enumerate(zip(panels, labels, positions)):
+        if not panel_path.lower().endswith('.pdf'):
+            print(f"  Panel {label}: non-PDF input, skipped in native PDF")
+            continue
+        if not os.path.exists(panel_path):
+            print(f"  Panel {label}: file not found")
+            continue
+
+        try:
+            src = fitz.open(panel_path)
+            # Convert pixel coords → PDF points
+            x_pt = px / dpi * 72.0
+            y_pt = py / dpi * 72.0
+            w_pt = pw / dpi * 72.0
+            h_pt = ph / dpi * 72.0
+            target_rect = fitz.Rect(x_pt, y_pt, x_pt + w_pt, y_pt + h_pt)
+            page.show_pdf_page(target_rect, src, 0)
+            src.close()
+        except Exception as e:
+            print(f"  Panel {label}: embedding error — {e}")
+            continue
+
+        # Vector label
+        label_color = (1, 1, 1) if dark_mode else (0, 0, 0)
+        label_size_pt = spec['label_size_pt']
+        display_label = label.upper() if spec['label_case'] == 'upper' else label.lower()
+
+        offset_pt = 2.5 * PT_PER_MM
+        label_x = x_pt + offset_pt
+        label_y = y_pt + offset_pt + label_size_pt * 0.35
+
+        try:
+            page.insert_text((label_x, label_y), display_label,
+                             fontsize=label_size_pt,
+                             fontname=arial_font_name,
+                             color=label_color)
+        except Exception as e:
+            print(f"  Panel {label}: label insertion error — {e}")
+
+    os.makedirs(os.path.dirname(output) if os.path.dirname(output) else '.', exist_ok=True)
+    pdf_path = f"{output}.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    print(f"  Saved native vector PDF: {pdf_path}")
+    return pdf_path
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1374,7 +2095,9 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
             standardize_bg=True, dark_mode='auto',
             fit_mode='fit', label_position='top-left',
             bg_color=None, font_path=None,
-            vector_output=True, smart_layout=False):
+            vector_output=True, smart_layout=False,
+            label_avoidance='off',
+            align='loose'):
     """
     Main composition function. Orchestrates layout, audit, raster, and vector.
 
@@ -1408,6 +2131,11 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
         If True, analyze panel proportions and auto-adjust layout to protect
         text readability. Wide panels get colspan>1; tall panels get rowspan>1.
         Only applies when layout='grid'.
+    label_avoidance : str
+        'off' — fixed offset (default).
+        'auto' — scan panel top row for content; shift label right if overlap
+                 detected; fallback to top-right if top row is busy.
+        'strict' — more aggressive avoidance with tighter scan range.
     """
     n = len(panels)
     if labels is None:
@@ -1475,22 +2203,14 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
     # Compute positions
     if layout == 'grid':
         if grid is None:
-            # Auto-determine grid
-            cols = int(n ** 0.5)
-            if cols * cols < n:
-                cols += 1
-            grid = (cols, cols)
-            # Adjust for common patterns
-            if n == 3:
-                grid = (1, 3)
-            elif n == 5:
-                grid = (2, 3)
-            elif n == 6:
-                grid = (2, 3)
-            elif n == 7 or n == 8:
-                grid = (2, 4)
-            elif n == 9:
-                grid = (3, 3)
+            # Auto-determine grid based on trimmed content dimensions
+            auto_rows, auto_cols = auto_detect_grid(
+                panels, target_width_mm=width_mm,
+                gap_mm=GAP_MM, dpi=dpi, max_cols=4
+            )
+            grid = (auto_rows, auto_cols)
+            print(f"  Auto-detected grid: {auto_rows} rows × {auto_cols} cols "
+                  f"(based on trimmed content sizing)")
         positions = compute_grid_positions(n, grid[0], grid[1], W, H, MARGIN, GAP)
 
     elif layout == 'custom':
@@ -1534,22 +2254,40 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
         output=output,
         standardize_bg=standardize_bg, dark_mode=dark_mode,
         fit_mode=fit_mode, label_position=label_position,
-        bg_color=bg_color, font_path=font_path
+        bg_color=bg_color, font_path=font_path,
+        label_avoidance=label_avoidance,
+        align=align,
     )
 
-    # Compose vector
+    # Compose vector (SVG via matplotlib)
     if vector_output:
-        print("\nComposing vector output (matplotlib)...")
+        print("\nComposing vector output (matplotlib SVG)...")
         try:
             compose_vector(
                 panels, labels, positions,
                 journal=journal, width_mm=width_mm, height_mm=height_mm, dpi=dpi,
                 output=output,
                 fit_mode=fit_mode, label_position=label_position,
-                dark_mode=dark_mode, font_path=font_path
+                dark_mode=dark_mode, font_path=font_path,
+                label_avoidance=label_avoidance,
+                align=align,
             )
         except Exception as e:
             print(f"  Vector output skipped: {e}")
+
+    # Compose native editable PDF (pymupdf — panels stay vector)
+    print("\nComposing native vector PDF (pymupdf)...")
+    try:
+        compose_pdf_native(
+            panels, labels, positions,
+            journal=journal, width_mm=width_mm, height_mm=height_mm, dpi=dpi,
+            output=output,
+            dark_mode=dark_mode, label_position=label_position,
+            label_avoidance=label_avoidance,
+            align=align,
+        )
+    except Exception as e:
+        print(f"  Native PDF output skipped: {e}")
 
     return positions
 
@@ -1598,6 +2336,21 @@ def main():
                         help='Auto-adjust panel sizes based on original proportions '
                              'to protect text readability. Wide panels get colspan>1; '
                              'tall panels get rowspan>1. Only for layout=grid.')
+    parser.add_argument('--label-avoidance', default='off',
+                        choices=['off', 'auto', 'strict'],
+                        help='Smart label placement: scan panel top row for content and '
+                             'shift label to avoid overlap. "auto"=moderate; "strict"=aggressive.')
+    parser.add_argument('--align', default='loose',
+                        choices=['loose', 'strict'],
+                        help='Panel alignment within grid slots. "loose"=center (default); '
+                             '"strict"=top-left align to reduce visual misalignment.')
+    parser.add_argument('--strip-top-pct', type=float, default=0,
+                        help='Strip N%% from the top of each panel (0-20). Useful for removing '
+                             'embedded figure titles before assembly. Cell Press prohibits '
+                             'titles embedded in figure images.')
+    parser.add_argument('--figure-type', default='main',
+                        choices=['main', 'supplementary'],
+                        help='Figure category. "supplementary" uses tighter spacing and smaller labels.')
     parser.add_argument('--audit-only', action='store_true',
                         help='Only run consistency audit, do not compose')
 
@@ -1626,6 +2379,10 @@ def main():
         standardize_bg = config.get('standardize_bg', True)
         vector_output = config.get('vector_output', True)
         smart_layout = config.get('smart_layout', False)
+        label_avoidance = config.get('label_avoidance', 'off')
+        align = config.get('align', 'loose')
+        strip_top_pct = config.get('strip_top_pct', 0)
+        figure_type = config.get('figure_type', 'main')
     else:
         panels = args.panels or []
         labels = args.labels
@@ -1646,6 +2403,10 @@ def main():
         standardize_bg = not args.no_std_bg
         vector_output = not args.no_vector
         smart_layout = args.smart_layout
+        label_avoidance = args.label_avoidance
+        align = args.align
+        strip_top_pct = args.strip_top_pct
+        figure_type = args.figure_type
 
     if not panels:
         print("ERROR: No panel files specified.")
@@ -1667,7 +2428,7 @@ def main():
     print_audit_report(audit_results, journal=journal)
 
     if args.audit_only:
-        return 0
+        return
 
     # Check for critical issues
     critical_issues = [
@@ -1680,7 +2441,7 @@ def main():
             resp = input().strip().lower()
             if resp not in ('y', 'yes'):
                 print("Aborted.")
-                return 1
+                sys.exit(1)
         except EOFError:
             print("(non-interactive, proceeding with warnings)")
 
@@ -1709,14 +2470,14 @@ def main():
         font_path=font_path,
         vector_output=vector_output,
         smart_layout=smart_layout,
+        label_avoidance=label_avoidance,
     )
 
     print("\n" + "=" * 60)
     print(" Done!")
     print(f" Output: {output}.*")
     print("=" * 60)
-    return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()

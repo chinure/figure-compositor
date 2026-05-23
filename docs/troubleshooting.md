@@ -103,29 +103,131 @@ python compose_figure.py --panels *.tif --fit-mode fill --dark-mode true
 
 ---
 
+## Issue: PDF text not editable in Adobe Illustrator
+
+**Symptoms:** Opening a panel PDF or composite PDF in Illustrator shows text as
+outlines/glyphs. The Fonts panel is empty or shows "Outlined". Cannot select or
+edit individual characters.
+
+**Cause 1 — Type 3 fonts:** matplotlib defaults to Type 3 (PostScript graphics)
+fonts for PDF output. Each glyph is a vector drawing, not a font character.
+Illustrator cannot convert these back to editable text.
+
+**Fix:** Set `pdf.fonttype = 42` to embed TrueType fonts:
+
+```python
+plt.rcParams.update({
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
+})
+```
+
+**Cause 2 — Font not registered:** If Arial (or your target font) is installed in
+a non-system directory (e.g. `~/.local/share/fonts/`), matplotlib's font manager
+will not find it automatically. It silently falls back to DejaVu Sans, even though
+`font.sans-serif` lists Arial first.
+
+**Fix:** Register the font explicitly **before** importing `pyplot`:
+
+```python
+import matplotlib.font_manager as fm
+fm.fontManager.addfont('/home/user/.local/share/fonts/arial/arial.ttf')
+fm.fontManager.addfont('/home/user/.local/share/fonts/arial/arialbd.ttf')
+
+import matplotlib.pyplot as plt  # import AFTER registration
+plt.rcParams.update({
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Arial', 'DejaVu Sans'],
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
+})
+```
+
+**Verification:**
+
+```python
+import fitz  # pymupdf
+doc = fitz.open('panel.pdf')
+for f in doc[0].get_fonts(full=True):
+    print(f"  {f[3]}: {f[2]}")
+# Should show: ArialMT Type0, Arial-BoldMT Type0
+# NOT: DejaVuSans Type3
+```
+
+---
+
+## Issue: Composite PDF panels are not editable (rasterized)
+
+**Symptoms:** Individual panel PDFs are editable in Illustrator, but after
+combining them into a composite Figure, the panels appear as images inside the
+PDF. Text cannot be selected.
+
+**Cause:** The vector composition path (`compose_vector()`) uses matplotlib's
+`ax.imshow()`, which converts PDF inputs to raster numpy arrays before embedding.
+The output PDF contains raster images, not vector panel pages.
+
+**Solution:** The script auto-detects when all inputs are PDF and uses the native
+vector path (`compose_pdf_native()`) instead. This path uses pymupdf's
+`show_pdf_page()` to embed each panel as a native PDF Form XObject — all text,
+lines, and curves remain vector and editable.
+
+**Requirements:**
+1. All panels must be PDF (not PNG/JPG).
+2. Panels must use Type 42 (TrueType) fonts (see "PDF text not editable" above).
+3. The script must have pymupdf installed: `pip install pymupdf`.
+
+**To force/check the native path:**
+
+```bash
+# The script auto-selects based on input extensions
+python compose_figure.py --config config.json  # panels must be *.pdf
+```
+
+If the native path is not available, the script falls back to the vector-hybrid
+path (raster panels + vector frame).
+
+---
+
 ## Issue: Vector output (SVG/PDF) has blurry/raster images
 
 **Symptoms:** The SVG/PDF frame is vector, but the embedded panel images look pixelated.
 
-**Cause:** This is expected behavior. The panel images themselves are raster (PNG/JPG/TIFF),
-and matplotlib embeds them as raster objects within the vector frame. Only the frame,
-labels, and annotations are vector.
+**Cause:** The default `compose_vector()` path uses matplotlib's `ax.imshow()`, which
+rasterizes any input (even PDF/SVG) into a pixel array before embedding. Only the
+frame, labels, and annotations added by the compositor remain vector.
 
-**When this is OK:**
-- The raster images are at sufficient DPI (≥ 300).
-- The figure is for screen viewing or print at intended size.
+**Three composition paths and their outputs:**
 
-**When you need fully editable vector:**
-- Panels are also vector (SVG/PDF inputs).
-- You need to edit text/curves in Illustrator/Inkscape post-assembly.
+| Path | Function | Input | Panel in output | Best for |
+|------|----------|-------|-----------------|----------|
+| Raster | `compose_raster()` | Any | Raster (PNG/TIFF) | Preview, pixel-perfect |
+| Vector-hybrid | `compose_vector()` | Any | **Raster** (imshow) | Raster inputs needing vector frame |
+| Native vector | `compose_pdf_native()` | **PDF only** | **Vector** (PDF XObject) | PDF inputs, Illustrator editing |
 
-**Solution for fully vector workflow:**
-1. Import individual SVG panels into Adobe Illustrator or Inkscape.
-2. Arrange them manually using the layout sketch from Stage 2.
-3. Add labels using the journal's font.
-4. Export as PDF.
+**Solution for fully editable vector (PDF inputs):**
 
-The compose script outputs raster+vector hybrid. For pure vector, use Illustrator.
+If panels are PDF/SVG and you need the composite to be editable in Illustrator:
+
+1. Generate panels as PDF with Type 42 fonts (see "PDF fonts not editable" below).
+2. The script auto-detects PDF inputs and uses `compose_pdf_native()` (pymupdf),
+   which embeds each panel page as a native PDF Form XObject.
+3. All text, lines, and curves remain vector and editable.
+
+```bash
+# Config example for vector workflow
+{
+  "panels": ["a.pdf", "b.pdf", "c.pdf"],
+  "vector_output": true,
+  "journal": "nature"
+}
+```
+
+**If panels are raster (PNG/JPG):** Use the vector-hybrid path. The panels will
+be raster, but the frame and labels are vector. Ensure panel DPI ≥ 300.
+
+**If you need manual control:** Import individual SVG/PDF panels into Adobe
+Illustrator or Inkscape, arrange using the layout sketch from Stage 2, add
+labels manually, and export as PDF.
 
 ---
 

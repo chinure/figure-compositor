@@ -1,8 +1,8 @@
 Pillow>=9.0.0
 numpy>=1.21.0
 
-# Optional: for PDF input support
-# pdf2image>=1.16.0
+# Optional: for PDF input/output support
+# pymupdf>=1.23.0
 
 # Optional: for SVG input support
 # cairosvg>=2.5.0
