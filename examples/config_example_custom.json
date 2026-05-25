@@ -1,5 +1,5 @@
 {
-  "_description": "Example: Custom layout using gridspec-style descriptors. Panel 'a' spans 2 columns on top. Panels b/c share the bottom row. Panel 'd' is a tall panel on the right spanning 2 rows.",
+  "_comment": "Example: Custom layout using gridspec-style descriptors. Panel 'a' spans 2 columns on top. Panels b/c share the bottom row. Panel 'd' is a tall panel on the right spanning 2 rows.",
   "panels": [
     "./results/overview_schematic.png",
     "./results/detail_1.png",

@@ -1,5 +1,5 @@
 {
-  "_description": "Example: Dark image plate (microscopy/fluorescence) with quantification panel below. Automatically detects dark mode.",
+  "_comment": "Example: Dark image plate (microscopy/fluorescence) with quantification panel below. Automatically detects dark mode.",
   "panels": [
     "./microscopy/channel_1.png",
     "./microscopy/channel_2.png",

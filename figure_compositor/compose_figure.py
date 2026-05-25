@@ -37,7 +37,7 @@ except ImportError:
 JOURNAL_DEFAULTS = {
     'nature': {
         'label_case': 'lower',
-        'label_size_pt': 15,
+        'label_size_pt': 8,
         'full_width_mm': 183,
         'font_family': 'Arial',
         'single_col_mm': 89,
@@ -1990,7 +1990,8 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
                        output='./figures/composite',
                        dark_mode=False, label_position='top-left',
                        label_avoidance='off',
-                       align='loose'):
+                       align='loose',
+                       strip_top_pct=0):
     """
     Compose panels directly from PDF sources into a single editable PDF.
     Uses pymupdf to embed original PDF pages as vector objects.
@@ -2047,6 +2048,12 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
 
         try:
             src = fitz.open(panel_path)
+            # Apply top strip if requested
+            if strip_top_pct > 0 and strip_top_pct <= 20:
+                src_page = src[0]
+                rect = src_page.rect
+                crop_y = rect.y0 + rect.height * strip_top_pct / 100.0
+                src_page.set_cropbox(fitz.Rect(rect.x0, crop_y, rect.x1, rect.y1))
             # Convert pixel coords → PDF points
             x_pt = px / dpi * 72.0
             y_pt = py / dpi * 72.0
@@ -2097,7 +2104,9 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
             bg_color=None, font_path=None,
             vector_output=True, smart_layout=False,
             label_avoidance='off',
-            align='loose'):
+            align='loose',
+            strip_top_pct=0,
+            figure_type='main'):
     """
     Main composition function. Orchestrates layout, audit, raster, and vector.
 
@@ -2164,6 +2173,11 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
     H = int(height_mm / 25.4 * dpi)
     MARGIN = int(MARGIN_MM / 25.4 * dpi)
     GAP = int(GAP_MM / 25.4 * dpi)
+
+    # Supplementary figures: tighter spacing, smaller labels
+    if figure_type == 'supplementary':
+        GAP = int(GAP_MM / 25.4 * dpi * 0.6)  # 40% tighter
+        print("  Supplementary mode: tighter spacing, smaller labels")
 
     # ── Smart layout: auto-adjust based on panel proportions ──
     if smart_layout and layout == 'grid':
@@ -2257,6 +2271,7 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
         bg_color=bg_color, font_path=font_path,
         label_avoidance=label_avoidance,
         align=align,
+        strip_top_pct=strip_top_pct,
     )
 
     # Compose vector (SVG via matplotlib)
@@ -2285,6 +2300,7 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
             dark_mode=dark_mode, label_position=label_position,
             label_avoidance=label_avoidance,
             align=align,
+            strip_top_pct=strip_top_pct,
         )
     except Exception as e:
         print(f"  Native PDF output skipped: {e}")
@@ -2471,6 +2487,9 @@ def main():
         vector_output=vector_output,
         smart_layout=smart_layout,
         label_avoidance=label_avoidance,
+        align=align,
+        strip_top_pct=strip_top_pct,
+        figure_type=figure_type,
     )
 
     print("\n" + "=" * 60)

@@ -1,5 +1,5 @@
 {
-  "_description": "Example: Regular 2x2 grid for 4 bar chart panels targeting Nature.",
+  "_comment": "Example: Regular 2x2 grid for 4 bar chart panels targeting Nature.",
   "panels": [
     "./results/panel_a_heatmap.png",
     "./results/panel_b_bars.png",

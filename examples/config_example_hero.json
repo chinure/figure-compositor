@@ -1,5 +1,5 @@
 {
-  "_description": "Example: Hero + support layout. Panel 'a' (heatmap) dominates top; panels b-d are supporting evidence below.",
+  "_comment": "Example: Hero + support layout. Panel 'a' (heatmap) dominates top; panels b-d are supporting evidence below.",
   "panels": [
     "./results/main_heatmap.png",
     "./results/validation_bar.png",
