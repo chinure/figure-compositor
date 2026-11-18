@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import io
+import math
 from pathlib import Path
 
 try:
@@ -485,10 +486,14 @@ def standardize_background(img, target_bg=(255, 255, 255), tolerance=20):
 def compute_grid_positions(n_panels, grid_rows, grid_cols,
                            canvas_w, canvas_h, margin, gap):
     """Compute (x, y, w, h) for each panel in a regular grid."""
+    if grid_rows < 1 or grid_cols < 1 or n_panels > grid_rows * grid_cols:
+        raise ValueError("Grid must have positive dimensions and enough cells for every panel")
     usable_w = canvas_w - 2 * margin - (grid_cols - 1) * gap
     usable_h = canvas_h - 2 * margin - (grid_rows - 1) * gap
     panel_w = usable_w // grid_cols
     panel_h = usable_h // grid_rows
+    if min(panel_w, panel_h) <= 0:
+        raise ValueError("Canvas is too small for the requested grid and margins")
 
     positions = []
     for i in range(n_panels):
@@ -550,6 +555,10 @@ def compute_hero_support_positions(n_panels, hero_index, hero_ratio,
     hero_side: 'top', 'left', 'center'
     """
     # Simplified: hero on top or left, rest in grid below/right
+    if not 0 <= hero_index < n_panels:
+        raise ValueError("hero_index must identify an existing panel")
+    if n_panels == 1:
+        return [(margin, margin, canvas_w - 2 * margin, canvas_h - 2 * margin)]
     n_support = n_panels - 1
     positions = [None] * n_panels
 
@@ -1793,10 +1802,7 @@ def compose_raster(panels, labels, positions, journal='nature',
                                v_align=v_a, h_align=h_a)
             canvas.paste(fitted, (px, py))
         except Exception as e:
-            print(f"     ❌ Error: {e}")
-            draw.rectangle([px, py, px + pw, py + ph], outline=(255, 0, 0), width=3)
-            draw.text((px + 10, py + 10), f"ERROR:\n{str(e)[:50]}",
-                      font=label_font, fill=(255, 0, 0))
+            raise ValueError(f"Cannot load panel {panel_path}: {e}") from e
 
         # Detect panel type for adaptive offset
         ptype = detect_panel_type(fitted)
@@ -1817,7 +1823,7 @@ def compose_raster(panels, labels, positions, journal='nature',
     # Save
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else '.', exist_ok=True)
     final.save(f"{output}.png", dpi=(dpi, dpi))
-    final.save(f"{output}.tiff", dpi=(dpi, dpi))
+    final.save(f"{output}.tiff", dpi=(dpi, dpi), compression="tiff_lzw")
     print(f"  Saved raster: {output}.png, {output}.tiff")
 
     return final
@@ -1833,7 +1839,7 @@ def compose_vector(panels, labels, positions, journal='nature',
                    fit_mode='fit', label_position='top-left',
                    dark_mode=False, font_path=None,
                    label_avoidance='off',
-                   align='loose'):
+                   align='loose', standardize_bg=True, bg_color=None):
     """
     Compose panels using matplotlib gridspec.
     Output is vector (SVG/PDF) with raster-embedded images.
@@ -1846,8 +1852,7 @@ def compose_vector(panels, labels, positions, journal='nature',
         import matplotlib.gridspec as gridspec
         import numpy as np
     except ImportError:
-        print("WARNING: matplotlib not available. Cannot generate vector output.")
-        return None
+        raise RuntimeError("Matplotlib is required for the requested SVG/PDF export")
 
     spec = JOURNAL_DEFAULTS.get(journal, JOURNAL_DEFAULTS['nature'])
 
@@ -1896,11 +1901,13 @@ def compose_vector(panels, labels, positions, journal='nature',
         if os.path.exists(panel_path):
             try:
                 img = load_image_any_format(panel_path, dpi=dpi)
-                # Handle alpha
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    img_array = np.array(img)
-                else:
-                    img_array = np.array(img.convert('RGB'))
+                panel_bg = bg_color or ((0, 0, 0) if dark_mode else (255, 255, 255))
+                if standardize_bg and not dark_mode:
+                    img = standardize_background(img, target_bg=panel_bg)
+                img = fit_image(img, pw, ph, fit_mode=fit_mode, bg_color=panel_bg,
+                                v_align='top' if align == 'strict' else 'center',
+                                h_align='left' if align == 'strict' else 'center')
+                img_array = np.array(img)
                 ax.imshow(img_array, aspect='auto',
                           interpolation='nearest',
                           extent=[0, 1, 0, 1])
@@ -1973,8 +1980,8 @@ def compose_vector(panels, labels, positions, journal='nature',
 
     # Save vector formats
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else '.', exist_ok=True)
-    fig.savefig(f"{output}.svg", bbox_inches='tight', facecolor=fig.get_facecolor())
-    fig.savefig(f"{output}.pdf", bbox_inches='tight', facecolor=fig.get_facecolor())
+    fig.savefig(f"{output}.svg", bbox_inches=None, pad_inches=0, facecolor=fig.get_facecolor())
+    fig.savefig(f"{output}.pdf", bbox_inches=None, pad_inches=0, facecolor=fig.get_facecolor())
     print(f"  Saved vector: {output}.svg, {output}.pdf")
 
     plt.close(fig)
@@ -1997,6 +2004,10 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
     Panel content (text, lines, shapes) remains fully editable in Illustrator.
     Labels are added as native vector text.
     """
+    if not panels or any(Path(path).suffix.lower() != '.pdf' for path in panels):
+        raise ValueError("Native PDF composition requires PDF inputs for every panel")
+    if len(panels) != len(labels) or len(panels) != len(positions):
+        raise ValueError("Every native PDF panel needs a label and position")
     try:
         import fitz
     except ImportError:
@@ -2042,8 +2053,8 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
             print(f"  Panel {label}: non-PDF input, skipped in native PDF")
             continue
         if not os.path.exists(panel_path):
-            print(f"  Panel {label}: file not found")
-            continue
+            doc.close()
+            raise FileNotFoundError(panel_path)
 
         try:
             src = fitz.open(panel_path)
@@ -2056,8 +2067,8 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
             page.show_pdf_page(target_rect, src, 0)
             src.close()
         except Exception as e:
-            print(f"  Panel {label}: embedding error — {e}")
-            continue
+            doc.close()
+            raise ValueError(f"Cannot embed PDF panel {panel_path}: {e}") from e
 
         # Vector label
         label_color = (1, 1, 1) if dark_mode else (0, 0, 0)
@@ -2074,7 +2085,8 @@ def compose_pdf_native(panels, labels, positions, journal='nature',
                              fontname=arial_font_name,
                              color=label_color)
         except Exception as e:
-            print(f"  Panel {label}: label insertion error — {e}")
+            doc.close()
+            raise ValueError(f"Cannot label PDF panel {panel_path}: {e}") from e
 
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else '.', exist_ok=True)
     pdf_path = f"{output}.pdf"
@@ -2137,9 +2149,25 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
                  detected; fallback to top-right if top row is busy.
         'strict' — more aggressive avoidance with tighter scan range.
     """
+    panels = [os.fspath(path) for path in panels]
+    if not panels:
+        raise ValueError("At least one panel is required")
+    for path in panels:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Panel not found: {path}")
+    if not math.isfinite(float(dpi)) or dpi <= 0:
+        raise ValueError("dpi must be finite and positive")
+    for value in (width_mm, height_mm):
+        if value is not None and (not math.isfinite(float(value)) or value <= 0):
+            raise ValueError("Canvas dimensions must be finite and positive")
+    destinations = {Path(f"{output}.{ext}").resolve() for ext in ('png', 'tiff', 'svg', 'pdf')}
+    if any(Path(path).resolve() in destinations for path in panels):
+        raise ValueError("Output filenames must not overwrite an input panel")
     n = len(panels)
     if labels is None:
         labels = [chr(97 + i) for i in range(n)]
+    if len(labels) != n:
+        raise ValueError("Every panel must have exactly one label")
 
     spec = JOURNAL_DEFAULTS.get(journal, JOURNAL_DEFAULTS['nature'])
 
@@ -2192,6 +2220,7 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
         grid = (auto_rows, auto_cols)
         if height_mm is None or height_mm < sug_height:
             height_mm = sug_height
+            width_mm, height_mm, _ = enforce_a4_limits(width_mm, height_mm, journal)
             H = int(height_mm / 25.4 * dpi)
             print(f"   Adjusted figure height to {height_mm} mm for readability.")
 
@@ -2218,7 +2247,8 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
             raise ValueError("layout='custom' requires layout_specs")
         positions = compute_custom_positions(layout_specs, W, H, MARGIN, GAP)
 
-    elif layout.startswith('hero'):
+    elif layout in ('hero-top', 'hero-left'):
+        hero_side = layout.split('-', 1)[1]
         if hero_index is None:
             hero_index = 0
         positions = compute_hero_support_positions(
@@ -2228,6 +2258,9 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
 
     else:
         raise ValueError(f"Unknown layout: {layout}")
+
+    if len(positions) != n:
+        raise ValueError("The layout must provide one position for every panel")
 
     # Auto-detect dark mode
     if dark_mode == 'auto':
@@ -2262,32 +2295,31 @@ def compose(panels, labels=None, layout='grid', layout_specs=None,
     # Compose vector (SVG via matplotlib)
     if vector_output:
         print("\nComposing vector output (matplotlib SVG)...")
-        try:
-            compose_vector(
-                panels, labels, positions,
-                journal=journal, width_mm=width_mm, height_mm=height_mm, dpi=dpi,
-                output=output,
-                fit_mode=fit_mode, label_position=label_position,
-                dark_mode=dark_mode, font_path=font_path,
-                label_avoidance=label_avoidance,
-                align=align,
-            )
-        except Exception as e:
-            print(f"  Vector output skipped: {e}")
-
-    # Compose native editable PDF (pymupdf — panels stay vector)
-    print("\nComposing native vector PDF (pymupdf)...")
-    try:
-        compose_pdf_native(
+        compose_vector(
             panels, labels, positions,
             journal=journal, width_mm=width_mm, height_mm=height_mm, dpi=dpi,
             output=output,
-            dark_mode=dark_mode, label_position=label_position,
+            fit_mode=fit_mode, label_position=label_position,
+            dark_mode=dark_mode, font_path=font_path,
             label_avoidance=label_avoidance,
-            align=align,
+            align=align, standardize_bg=standardize_bg, bg_color=bg_color,
         )
-    except Exception as e:
-        print(f"  Native PDF output skipped: {e}")
+
+    # Preserve vectors only when every panel is PDF and transformations agree.
+    native_compatible = (all(Path(path).suffix.lower() == '.pdf' for path in panels)
+                         and fit_mode == 'fit' and label_position == 'top-left'
+                         and label_avoidance == 'off' and align == 'loose')
+    if vector_output and native_compatible:
+        print("\nComposing native vector PDF (pymupdf)...")
+        try:
+            compose_pdf_native(
+                panels, labels, positions,
+                journal=journal, width_mm=width_mm, height_mm=height_mm, dpi=dpi,
+                output=output, dark_mode=dark_mode, label_position=label_position,
+                label_avoidance=label_avoidance, align=align,
+            )
+        except Exception as e:
+            print(f"  Native PDF output skipped: {e}")
 
     return positions
 
@@ -2408,6 +2440,11 @@ def main():
         strip_top_pct = args.strip_top_pct
         figure_type = args.figure_type
 
+    if strip_top_pct != 0:
+        parser.error("Top stripping is not implemented consistently across formats; prepare cropped source panels explicitly")
+    if figure_type != 'main':
+        parser.error("Supplementary styling is not implemented; use explicit canvas/layout settings")
+
     if not panels:
         print("ERROR: No panel files specified.")
         parser.print_help()
@@ -2471,6 +2508,7 @@ def main():
         vector_output=vector_output,
         smart_layout=smart_layout,
         label_avoidance=label_avoidance,
+        align=align,
     )
 
     print("\n" + "=" * 60)
