@@ -29,6 +29,7 @@ requires-python = ">=3.8"
 dependencies = [
     "Pillow>=9.0.0",
     "numpy>=1.21.0",
+    "matplotlib>=3.6.0",
 ]
 
 [project.optional-dependencies]
@@ -41,9 +42,9 @@ dev = ["pytest>=7.0", "black", "ruff"]
 compose-figure = "figure_compositor.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/figure-compositor"
-Documentation = "https://github.com/yourusername/figure-compositor#readme"
-Issues = "https://github.com/yourusername/figure-compositor/issues"
+Homepage = "https://github.com/chinure/figure-compositor"
+Documentation = "https://github.com/chinure/figure-compositor#readme"
+Issues = "https://github.com/chinure/figure-compositor/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
